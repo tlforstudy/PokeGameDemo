@@ -1,0 +1,12 @@
+/Binaries/
+/DerivedDataCache/
+/Intermediate/
+/Saved/
+/.vscode/
+
+*.sln
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.code-workspace
