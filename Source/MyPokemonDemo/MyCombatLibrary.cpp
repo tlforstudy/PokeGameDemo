@@ -21,6 +21,10 @@ namespace
 
 void UMyCombatLibrary::SortActorsBySpeed(TArray<AActor*>& Actors)
 {
+    Actors.RemoveAll([](const AActor* Actor)
+    {
+        return !IsValid(Actor);
+    });
     Actors.Sort([](const AActor& A, const AActor& B) {
         return GetActorSpeed(A) > GetActorSpeed(B);
     });
