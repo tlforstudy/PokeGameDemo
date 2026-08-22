@@ -6,45 +6,15 @@
 
 ## 核心架构亮点
 
-- **Data Asset 数据驱动物种与技能配置**
-  - 使用 `DA_PokemonSpecies` 描述物种名称、属性、基础战斗参数和模型相关配置。
-  - 使用 `DA_move` 及具体 Move Data Asset 描述技能属性、威力和技能分类。
-  - 将静态配置与战斗执行逻辑分离，新增物种或技能时主要通过创建数据资产和配置引用完成，减少 Blueprint 分支复制。
+- **数据驱动与持久化分层**：使用 Data Asset 配置物种和技能，Struct 保存队伍状态，SaveGame 负责持久化；Runtime Actor 只承担当前战斗逻辑与场景表现，避免静态配置、存档数据和 Actor 生命周期相互耦合。
 
-- **结构体数据与 Runtime Actor 分层**
-  - 使用 `ST_PlayerPokemonEntry`、`ST_TrainerPokemonEntry` 等结构体保存玩家和训练师的队伍配置。
-  - `BP_TurnManager` 根据结构体数据构建 `RuntimePlayerParty` 与 `RuntimeEnemyParty`，战斗阶段只操作当前运行时 Actor。
-  - 将持久化数据与场景表现解耦，避免把已经销毁的战斗 Actor 当作长期队伍数据保存或复用。
+- **集中式战斗状态机**：`BP_TurnManager` 统一管理回合阶段、行动、换人、阵亡与结算，UMG 仅提交操作并展示状态；C++ Function Library 负责速度排序、同速随机和无效对象过滤。
 
-- **SaveGame 持久化玩家进度**
-  - 使用 `SG_PlayerProgress` 保存玩家队伍及战斗状态相关数据。
-  - 通过结构体序列化队伍配置和实时状态，支持退出游戏后重新加载存档，并为后续扩展多存档槽、道具和进度标记保留数据边界。
+- **战斗逻辑与演出解耦**：`BP_BattleStage` 管理双方 Slot、地面检测和物种离地偏移，通过 View Target 切换战斗镜头，使位置计算、镜头和精灵动画能够独立复用。
 
-- **集中式回合战斗状态机**
-  - `BP_TurnManager` 管理 `BattlePhase`、当前回合、当前战斗双方、队伍切换、技能执行、阵亡处理和结算流程。
-  - 通过 `CurrentPlayer`、`CurrentEnemy`、队伍数组和战斗阶段控制合法操作，避免 UI 直接修改战斗核心状态。
-  - 玩家和敌方均支持多成员队伍、阵亡后的强制切换以及回合中的主动切换。
+- **服务器权威联机结算**：客户端通过 Server RPC 提交技能或换人意图，`ANetBattleGameMode` 统一验证并结算行动顺序、命中、伤害、阵亡和胜负；GameState / PlayerState 将权威状态同步至双方客户端。
 
-- **C++ 速度排序与同速规则处理**
-  - `UMyCombatLibrary::SortActorsBySpeed` 作为 Blueprint Function Library 暴露给蓝图。
-  - C++ 通过反射读取 Actor 的 `Speed` 属性，先按速度降序排序，再对同速 Actor 做组内随机打乱，保证速度优先级规则统一且同速结果符合战斗设计。
-  - 排序前移除无效 Actor，降低已销毁对象进入排序器导致访问异常的风险，并将高频数组处理逻辑集中到可复用的 C++ 工具函数中。
-
-- **BattleStage 与 View Target 战斗演出解耦**
-  - `BP_BattleStage` 提供玩家和敌方战斗 Slot、战斗地面检测以及出场位置计算。
-  - 进入战斗时通过 `Set View Target with Blend` 将镜头切换到战斗视角，结束战斗后恢复玩家 Pawn 视角。
-  - 使用向下 Line Trace 获取战斗地面，并可结合 `SpeciesData` 中的离地偏移处理不同模型的贴地、悬浮和飞行高度。
-  - 战斗阶段只刷新战斗 Actor 的位置和可见性，不在每个回合移动整个战斗舞台，降低镜头倾斜和场景位移风险。
-
-- **C++ 服务器权威联机战斗**
-  - 客户端通过 `ANetBattlePlayerController` 的 Server RPC 提交技能或换人意图，不在本地直接修改生命值、回合或胜负结果。
-  - `ANetBattleGameMode` 在服务器收集并验证双方 `FNetBattleAction`，统一处理速度顺序、命中、属性倍率、伤害、阵亡、强制换人与胜负结算，保证战斗规则的权威性和确定性。
-  - `ANetBattlePlayerState` 复制玩家队伍、当前出战索引与行动提交状态；`ANetBattleGameState` 复制战斗阶段、回合、日志和表现事件，使两个客户端从同一权威状态刷新 UI。
-
-- **Replicated State 与 Battle Cue 表现分层**
-  - 使用 `FNetPokemonState`、`FNetMoveState`、`FNetBattleAction` 和 `FNetBattleCue` 对联机数据进行结构化建模，避免网络状态依赖单机 Runtime Actor 引用。
-  - 服务器按回合结果生成带 `CueId`、伤害前后 HP 和建议持续时间的有序 Battle Cue；客户端本地排队播放攻击、受击、缓动掉血、阵亡、换人和结算表现。
-  - 权威状态负责最终一致性，Cue 负责表现时序，避免网络复制直接覆盖正在播放的血条与动画。
+- **状态同步与表现时序分离**：联机状态使用 `FNetPokemonState`、`FNetBattleAction` 等结构体建模；Replicated State 保证最终一致性，有序 Battle Cue 驱动攻击、受击、缓动掉血、换人与结算表现。
 
 ## 系统流程图（文字版）
 
@@ -165,55 +135,16 @@ GameMode 收集双方行动，全部提交后进入 ResolvingTurn
 - **双人联机对战**
   - 原生 C++ Host / Join 入口、IPv4 直连和 Listen Server 等待界面。
   - 服务器权威的行动验证、回合顺序、伤害、换人、阵亡与胜负结算。
-  - 双方多精灵队伍、主动换人、濒死后的玩家手动强制换人。
-  - GameState / PlayerState 属性复制、RepNotify / 委托驱动的客户端 UI 刷新。
-  - Battle Cue 顺序播放攻击、受击、伤害数字、缓动掉血、阵亡和结算表现。
-  - 双客户端独立视角、同步战斗日志、按钮提交状态与胜负界面。
+  - 支持多精灵队伍、主动换人、濒死后手动强制换人以及双方独立胜负界面。
+  - GameState / PlayerState 复制状态，Battle Cue 驱动双客户端 UI、日志和战斗演出。
 
 ## 技术栈与引擎特性
 
-- **引擎**：Unreal Engine 5.4，Windows，DirectX 12 / Shader Model 6 配置。
-- **C++**：
-  - `UBlueprintFunctionLibrary`。
-  - C++ 反射读取 Blueprint Actor 的 `Speed` 属性。
-  - `TArray` 有效性清理、速度排序和同速组内随机化。
-  - `GameMode` / `GameState` / `PlayerController` / `PlayerState` 联机职责划分。
-  - Server RPC、属性复制、RepNotify、动态多播委托和服务器权威状态机。
-  - `USTRUCT(BlueprintType)` 网络数据结构与 C++ / Blueprint 边界。
-- **Blueprint**：
-  - `BP_TurnManager`：战斗状态、回合和队伍生命周期。
-  - `BP_BattleStage`：Slot、战斗地面和战斗位置。
-  - `BP_pokemon`：运行时战斗 Actor、属性、技能、生命值和阵亡状态。
-  - `BP_Trainer`：训练师队伍和训练师战斗触发。
-  - `BP_Pokeball`：投掷物运动与碰撞事件。
-- **数据系统**：
-  - Data Asset 风格的物种和技能配置。
-  - 用户自定义结构体数组。
-  - `SaveGame` / `SG_PlayerProgress` 存档对象。
-  - `E_BattlePhase`、移动类型和技能分类枚举。
-  - 当前类型和战斗阶段使用枚举建模，未引入 GameplayTags；如果扩展状态效果、抗性标签或复杂技能条件，可将对应字段迁移到 GameplayTags。
-- **UI 与输入**：
-  - UMG Widget Blueprint：`WBP_BattleUI`、`WBP_PartyStatus`、`WBP_NetBattleUI`。
-  - 动态文本、血条、技能按钮、战斗日志和状态面板。
-  - Enhanced Input Player Input 配置，并结合传统 Input Key 处理部分演示按键。
-- **网络框架**：
-  - Listen Server + IPv4 直连 Host / Join。
-  - `ANetBattleGameMode`：服务器侧玩家接入、行动收集、规则验证和回合结算。
-  - `ANetBattleGameState`：复制战斗阶段、回合、战斗日志与 Battle Cue。
-  - `ANetBattlePlayerState`：复制玩家队伍、当前精灵和行动提交状态。
-  - `ANetBattlePresenter`：将复制状态映射为本地模型、镜头和动画表现。
-  - `UNetBattleVisualInterface`：复用精灵蓝图的攻击、受击、阵亡与换人动画。
-- **镜头与演出**：
-  - `PlayerController::SetViewTargetWithBlend`。
-  - Camera Shake：`BP_HitCameraShake`。
-  - Timeline / Blueprint 动画式 UI 和伤害数字表现。
-- **碰撞与空间定位**：
-  - Projectile Collision。
-  - `Line Trace Single for Objects` / World Static 地面检测。
-  - Actors to Ignore 过滤当前战斗 Actor，避免射线命中自身。
-- **内容资源**：
-  - `SimpleDamageText` 纯 Blueprint 伤害数字资源。
-  - Mannequin、ArenaAsset 和 MonsterForSurvivalGame 内容资源。
+- **引擎**：Unreal Engine 5.4、C++、Blueprint、UMG。
+- **数据与存档**：Data Asset、Struct、Enum、SaveGame。
+- **单机战斗**：Blueprint 状态机、C++ Function Library、View Target、Line Trace。
+- **联机框架**：Listen Server、Server RPC、属性复制、RepNotify、动态多播委托。
+- **网络职责**：GameMode 权威结算，GameState / PlayerState 状态同步，Presenter / Battle Cue 驱动客户端表现。
 
 ## 目录结构
 
@@ -306,14 +237,3 @@ MyPokemonDemo/
 ## 视频演示
 
 - [Bilibili：UE5 回合制战斗 Demo（单机闭环 + 双人联机）](https://www.bilibili.com/video/BV1ufuB6SErE/?share_source=copy_web&vd_source=316a67c1c2fe977667654c279e9aacee)
-
-## 面试关注点
-
-- **数据与逻辑解耦**：物种、技能和队伍配置通过 Data Asset / Struct 管理，战斗流程不依赖具体物种 Blueprint 子类。
-- **运行时与持久化分离**：存档结构体负责长期数据，Runtime Actor 负责当前战斗表现，降低 Actor 生命周期变化带来的引用风险。
-- **战斗状态集中管理**：Turn Manager 统一处理回合、行动顺序、切换、阵亡和结算，UMG 负责输入与展示。
-- **C++ / Blueprint 边界清晰**：C++ 提供可复用的通用排序工具，Blueprint 负责战斗流程编排和内容配置。
-- **生命周期清理**：战斗退出阶段清理 UI、运行时数组和无效对象，野生遭遇对象按胜利结果销毁，避免重复触发和悬空引用。
-- **服务器权威**：客户端只提交操作意图，伤害、换人、阵亡和胜负均由服务器验证与结算，降低客户端状态分歧和非法操作风险。
-- **状态与表现分离**：Replicated State 保证最终一致性，Battle Cue 保证攻击、受击和血条动画的播放顺序，使网络同步不会直接覆盖表现过程。
-- **联机职责边界**：GameMode 负责规则，PlayerState / GameState 负责复制，PlayerController 负责 RPC，Presenter 与 UMG 负责本地表现，便于定位同步问题并扩展新玩法。
